@@ -3,11 +3,12 @@ use std::collections::HashMap;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::scheduler::{ToSchedulerMessage, FromSchedulerMessage};
-use crate::scheduler::schedproto::{WorkerId, TaskAssignment, SchedulerRegistration, TaskId};
+use crate::scheduler::schedproto::{WorkerId, TaskAssignment, SchedulerRegistration, TaskId, TaskUpdateType};
 use crate::scheduler::interface::SchedulerComm;
 use futures::StreamExt;
-use crate::scheduler::implementation::task::{TaskRef, Task};
+use crate::scheduler::implementation::task::{TaskRef, Task, SchedulerTaskState};
 use crate::scheduler::implementation::worker::WorkerRef;
+use crate::scheduler::implementation::utils::compute_b_level;
 
 
 pub struct Scheduler {
@@ -26,6 +27,14 @@ impl Scheduler {
             network_bandwidth: 100.0, // Guess better default
             _tmp_hack: Vec::new(),
         }
+    }
+
+    fn get_task(&self, task_id: TaskId) -> &TaskRef {
+        self.tasks.get(&task_id).unwrap_or_else(|| panic!("Task {} not found", task_id))
+    }
+
+    fn get_worker(&self, worker_id: WorkerId) -> &WorkerRef {
+        self.workers.get(&worker_id).unwrap_or_else(|| panic!("Worker {} not found", worker_id))
     }
 
     pub async fn start(mut self, mut comm: SchedulerComm) -> crate::Result<()> {
@@ -48,19 +57,32 @@ impl Scheduler {
     }
 
     pub fn process_new_tasks(&self, new_tasks: Vec<TaskRef>) {
-        /*for tref in new_tasks {
-            let task = tref.get();
-            if task.consumers().is_empty() {
-
-            }
-        }*/
+        // TODO: utilize information and do not recompute all b-levels
+        compute_b_level(&self.tasks);
     }
 
     pub fn update(&mut self, messages: Vec<ToSchedulerMessage>, sender: &mut UnboundedSender<FromSchedulerMessage>) {
         let mut new_tasks: Vec<TaskRef> = Vec::new();
         for message in messages {
             match message {
-                ToSchedulerMessage::TaskUpdate(_) => { /* TODO */ }
+                ToSchedulerMessage::TaskUpdate(tu) => {
+                    let mut task = self.get_task(tu.id).get_mut();
+                    match tu.state {
+                        TaskUpdateType::Placed => {
+                            let worker = self.get_worker(tu.worker);
+                            task.state = SchedulerTaskState::Finished;
+                            task.placement.push(worker.clone());
+                        },
+                        TaskUpdateType::Removed => {
+                            let worker = self.get_worker(tu.worker);
+                            let index = task.placement.iter().position(|x| x == worker).unwrap();
+                            task.placement.remove(index);
+                        },
+                        TaskUpdateType::Discard => {
+                            task.placement.clear();
+                        }
+                    }
+                }
                 ToSchedulerMessage::NewTask(ti) => {
                     log::debug!("New task {}", ti.id);
                     let task_id = ti.id;
@@ -86,7 +108,6 @@ impl Scheduler {
         if !new_tasks.is_empty() {
             self.process_new_tasks(new_tasks)
         }
-
 
         // HACK, random scheduler
         if !self.workers.is_empty() {
@@ -159,6 +180,13 @@ mod tests {
         let mut sender = make_sender();
         let mut scheduler = Scheduler::new();
         submit_graph1(&mut scheduler, &mut sender);
+        assert_eq!(scheduler.get_task(7).get().b_level, 1.0);
+        assert_eq!(scheduler.get_task(6).get().b_level, 2.0);
+        assert_eq!(scheduler.get_task(5).get().b_level, 1.0);
+        assert_eq!(scheduler.get_task(4).get().b_level, 2.0);
+        assert_eq!(scheduler.get_task(3).get().b_level, 3.0);
+        assert_eq!(scheduler.get_task(2).get().b_level, 3.0);
+        assert_eq!(scheduler.get_task(1).get().b_level, 4.0);
     }
 }
 

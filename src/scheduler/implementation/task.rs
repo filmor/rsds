@@ -6,6 +6,7 @@ use crate::scheduler::implementation::worker::WorkerRef;
 pub enum SchedulerTaskState {
     Waiting,
     Ready,
+    Finished,
 }
 
 pub struct Task {
@@ -15,7 +16,8 @@ pub struct Task {
     pub consumers: HashSet<TaskRef>,
     pub b_level: f32,
     pub unfinished_deps: u32,
-    pub worker: Option<WorkerRef>,
+    pub assigned_worker: Option<WorkerRef>,
+    pub placement: Vec<WorkerRef>,
 }
 
 pub type TaskRef = crate::common::WrappedRcRefCell<Task>;
@@ -50,7 +52,8 @@ impl TaskRef {
             b_level: 0.0,
             unfinished_deps,
             consumers: Default::default(),
-            worker: None,
+            assigned_worker: None,
+            placement: Default::default(),
         });
         {
             let task = task_ref.get();

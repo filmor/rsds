@@ -23,6 +23,15 @@ pub struct Task {
 pub type TaskRef = crate::common::WrappedRcRefCell<Task>;
 
 impl Task {
+
+    #[inline]
+    pub fn is_waiting(&self) -> bool {
+        match self.state {
+            SchedulerTaskState::Waiting => true,
+            _ => false
+        }
+    }
+
     #[inline]
     pub fn is_ready(&self) -> bool {
         match self.state {

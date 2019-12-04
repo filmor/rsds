@@ -3,29 +3,34 @@ use std::collections::HashMap;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::scheduler::{ToSchedulerMessage, FromSchedulerMessage};
-use crate::scheduler::schedproto::{WorkerId, TaskAssignment, SchedulerRegistration, TaskId, TaskUpdateType};
+use crate::scheduler::schedproto::{WorkerId, TaskAssignment, SchedulerRegistration, TaskId, TaskUpdateType, TaskUpdate};
 use crate::scheduler::interface::SchedulerComm;
 use futures::StreamExt;
 use crate::scheduler::implementation::task::{TaskRef, Task, SchedulerTaskState};
 use crate::scheduler::implementation::worker::WorkerRef;
 use crate::scheduler::implementation::utils::compute_b_level;
+use std::time::{Instant, Duration};
+use tokio::sync::oneshot;
 
 
 pub struct Scheduler {
     network_bandwidth: f32,
     workers: HashMap<WorkerId, WorkerRef>,
     tasks: HashMap<TaskId, TaskRef>,
-
-    _tmp_hack: Vec<WorkerId>,
+    ready_to_assign: Vec<TaskRef>,
+    new_tasks: Vec<TaskRef>,
 }
+
+const MIN_SCHEDULING_DELAY : Duration = Duration::from_millis(15);
 
 impl Scheduler {
     pub fn new() -> Self {
         Scheduler {
             workers: Default::default(),
             tasks: Default::default(),
+            ready_to_assign: Default::default(),
+            new_tasks: Default::default(),
             network_bandwidth: 100.0, // Guess better default
-            _tmp_hack: Vec::new(),
         }
     }
 
@@ -49,11 +54,32 @@ impl Scheduler {
                 }))
                 .expect("Send failed");
 
-            while let Some(msgs) = comm.recv.next().await {
-                self.update(msgs, &mut comm.send);
-            }
+            let last_scheduling_time = Instant::now() - MIN_SCHEDULING_DELAY;
+            let (wake_send, mut wake_recv) = oneshot::channel::<()>();
+            let mut wake_send = Some(wake_send);
+            let message_reader = async {
+                while let Some(msgs) = comm.recv.next().await {
+                    if !self.update(msgs) {
+                        wake_send.take().map(|s| s.send(()).unwrap());
+                    }
+                }
+            };
+            let scheduling = async {
+                loop {
+                    wake_recv.await?;
+                    let (s, r) = oneshot::channel::<()>();
+                    wake_send = Some(s);
+                    wake_recv = r;
+                    self.schedule(&mut comm.send);
+                }
+            };
+            //f1.await;
             log::debug!("Scheduler closed");
             Ok(())
+    }
+
+    pub fn schedule(&mut self, sender: &mut UnboundedSender<FromSchedulerMessage>) {
+
     }
 
     pub fn process_new_tasks(&self, new_tasks: Vec<TaskRef>) {
@@ -61,27 +87,59 @@ impl Scheduler {
         compute_b_level(&self.tasks);
     }
 
-    pub fn update(&mut self, messages: Vec<ToSchedulerMessage>, sender: &mut UnboundedSender<FromSchedulerMessage>) {
+    fn task_update(&mut self, tu: TaskUpdate) -> bool {
+        let mut tref = self.get_task(tu.id).clone();
+        let mut task = tref.get_mut();
+        match tu.state {
+            TaskUpdateType::Placed => {
+                let worker = self.get_worker(tu.worker).clone();
+                match task.state {
+                    SchedulerTaskState::Ready => {
+                        task.state = SchedulerTaskState::Finished;
+                        let mut invoke_scheduling = false;
+                        for tref in &task.consumers {
+                            let mut t = tref.get_mut();
+                            if t.unfinished_deps <= 1 {
+                                assert!(t.unfinished_deps > 0);
+                                assert!(t.is_waiting());
+                                t.unfinished_deps -= 1;
+                                t.state = SchedulerTaskState::Ready;
+                                self.ready_to_assign.push(tref.clone());
+                                invoke_scheduling = true;
+                            } else {
+                                t.unfinished_deps -= 1;
+                            }
+                        }
+                        return invoke_scheduling;
+                    },
+                    SchedulerTaskState::Finished => {
+                        /* do nothing extra */
+                    },
+                    _ => {
+                        panic!("Invalid update");
+                    }
+                };
+                task.placement.push(worker);
+            },
+            TaskUpdateType::Removed => {
+                let worker = self.get_worker(tu.worker);
+                let index = task.placement.iter().position(|x| x == worker).unwrap();
+                task.placement.remove(index);
+            },
+            TaskUpdateType::Discard => {
+                task.placement.clear();
+            }
+        }
+        return false;
+    }
+
+    pub fn update(&mut self, messages: Vec<ToSchedulerMessage>) -> bool {
         let mut new_tasks: Vec<TaskRef> = Vec::new();
+        let mut invoke_scheduling = false;
         for message in messages {
             match message {
                 ToSchedulerMessage::TaskUpdate(tu) => {
-                    let mut task = self.get_task(tu.id).get_mut();
-                    match tu.state {
-                        TaskUpdateType::Placed => {
-                            let worker = self.get_worker(tu.worker);
-                            task.state = SchedulerTaskState::Finished;
-                            task.placement.push(worker.clone());
-                        },
-                        TaskUpdateType::Removed => {
-                            let worker = self.get_worker(tu.worker);
-                            let index = task.placement.iter().position(|x| x == worker).unwrap();
-                            task.placement.remove(index);
-                        },
-                        TaskUpdateType::Discard => {
-                            task.placement.clear();
-                        }
-                    }
+                    invoke_scheduling |= self.task_update(tu);
                 }
                 ToSchedulerMessage::NewTask(ti) => {
                     log::debug!("New task {}", ti.id);
@@ -90,6 +148,7 @@ impl Scheduler {
                     let task = TaskRef::new(ti, inputs);
                     new_tasks.push(task.clone());
                     assert!(self.tasks.insert(task_id, task).is_none());
+                    invoke_scheduling = true;
                 }
                 ToSchedulerMessage::NewWorker(wi) => {
                     assert!(self
@@ -105,12 +164,14 @@ impl Scheduler {
                 }
             }
         }
-        if !new_tasks.is_empty() {
+
+        /*if !new_tasks.is_empty() {
             self.process_new_tasks(new_tasks)
-        }
+        }*/
+        return invoke_scheduling;
 
         // HACK, random scheduler
-        if !self.workers.is_empty() {
+        /*if !self.workers.is_empty() {
             use rand::seq::SliceRandom;
             let mut result = Vec::new();
             let mut rng = rand::thread_rng();
@@ -128,7 +189,7 @@ impl Scheduler {
             sender
                 .try_send(FromSchedulerMessage::TaskAssignments(result))
                 .unwrap();
-        }
+        }*/
     }
 }
 

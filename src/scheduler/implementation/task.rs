@@ -5,7 +5,6 @@ use crate::scheduler::implementation::worker::WorkerRef;
 
 pub enum SchedulerTaskState {
     Waiting,
-    Ready,
     Finished,
 }
 
@@ -33,11 +32,16 @@ impl Task {
     }
 
     #[inline]
-    pub fn is_ready(&self) -> bool {
+    pub fn is_finished(&self) -> bool {
         match self.state {
-            SchedulerTaskState::Ready => true,
+            SchedulerTaskState::Finished => true,
             _ => false
         }
+    }
+
+    #[inline]
+    pub fn is_ready(&self) -> bool {
+        self.unfinished_deps == 0
     }
 }
 
@@ -46,18 +50,16 @@ impl TaskRef {
         let mut unfinished_deps = 0;
         for inp in &inputs {
             let t = inp.get();
-            if !t.is_ready() {
+            if t.is_waiting() {
                 unfinished_deps += 1;
+            } else {
+                assert!(t.is_finished());
             }
         }
         let task_ref = Self::wrap(Task {
             id: ti.id,
             inputs,
-            state: if unfinished_deps != 0 {
-                SchedulerTaskState::Waiting
-            } else {
-                SchedulerTaskState::Ready
-            },
+            state: SchedulerTaskState::Waiting,
             b_level: 0.0,
             unfinished_deps,
             consumers: Default::default(),

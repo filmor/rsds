@@ -11,6 +11,8 @@ use crate::scheduler::implementation::worker::WorkerRef;
 use crate::scheduler::implementation::utils::compute_b_level;
 use std::time::{Instant, Duration};
 use tokio::sync::oneshot;
+use tokio::timer::{delay, Delay};
+use futures::{future};
 
 
 pub struct Scheduler {
@@ -54,37 +56,77 @@ impl Scheduler {
                 }))
                 .expect("Send failed");
 
-            let last_scheduling_time = Instant::now() - MIN_SCHEDULING_DELAY;
-            let (wake_send, mut wake_recv) = oneshot::channel::<()>();
-            let mut wake_send = Some(wake_send);
-            let message_reader = async {
-                while let Some(msgs) = comm.recv.next().await {
-                    if !self.update(msgs) {
-                        wake_send.take().map(|s| s.send(()).unwrap());
+/*            let (wake_send, mut wake_recv) = oneshot::channel::<()>();
+            let mut wake_send = Some(wake_send);*/
+            let mut scheduler_delay : Option<Delay> = None;
+            let mut need_scheduling = false;
+
+            while let Some(msgs) = match scheduler_delay {
+                None => comm.recv.next().await,
+                Some(d) => {
+                    match future::select(comm.recv.next(), d).await {
+                        futures::future::Either::Left((msgs, d)) => {
+                            scheduler_delay = Some(d);
+                            msgs
+                        }
+                        futures::future::Either::Right((_, rcv)) => {
+                            scheduler_delay = None;
+                            if need_scheduling {
+                                need_scheduling = false;
+                                self.schedule(&mut comm.send);
+                            }
+                            rcv.await
+                        }
                     }
+                }
+            } {
+                if !self.update(msgs) {
+                    if scheduler_delay.is_none() {
+                        scheduler_delay = Some(delay(Instant::now() + MIN_SCHEDULING_DELAY));
+                        self.schedule(&mut comm.send);
+                    } else {
+                        need_scheduling = true;
+                    }
+                }
+            }
+
+        /*let message_reader = async {
+
+                while let Some(msgs) = comm.recv.next().await {
                 }
             };
             let scheduling = async {
                 loop {
-                    wake_recv.await?;
+                    wake_recv.await;
                     let (s, r) = oneshot::channel::<()>();
                     wake_send = Some(s);
                     wake_recv = r;
+                    let when = Instant::now() + Duration::from_millis(100);
                     self.schedule(&mut comm.send);
+                    delay(when).await;
                 }
-            };
+            };*/
             //f1.await;
             log::debug!("Scheduler closed");
             Ok(())
     }
 
     pub fn schedule(&mut self, sender: &mut UnboundedSender<FromSchedulerMessage>) {
+        if !self.new_tasks.is_empty() {
+            // TODO: utilize information and do not recompute all b-levels
+            compute_b_level(&self.tasks);
+            self.new_tasks = Vec::new()
+        }
+        if self.workers.is_empty() {
+            return;
+        }
+        // TODO: Do not sort on every schedule
+        //self.ready_to_assign.sort_by(|a, b| a.get().b_level.partial_cmp(&b.get().b_level).unwrap());
 
     }
 
     pub fn process_new_tasks(&self, new_tasks: Vec<TaskRef>) {
-        // TODO: utilize information and do not recompute all b-levels
-        compute_b_level(&self.tasks);
+
     }
 
     fn task_update(&mut self, tu: TaskUpdate) -> bool {
@@ -94,7 +136,7 @@ impl Scheduler {
             TaskUpdateType::Placed => {
                 let worker = self.get_worker(tu.worker).clone();
                 match task.state {
-                    SchedulerTaskState::Ready => {
+                    SchedulerTaskState::Waiting if task.is_ready() => {
                         task.state = SchedulerTaskState::Finished;
                         let mut invoke_scheduling = false;
                         for tref in &task.consumers {
@@ -103,7 +145,6 @@ impl Scheduler {
                                 assert!(t.unfinished_deps > 0);
                                 assert!(t.is_waiting());
                                 t.unfinished_deps -= 1;
-                                t.state = SchedulerTaskState::Ready;
                                 self.ready_to_assign.push(tref.clone());
                                 invoke_scheduling = true;
                             } else {
@@ -134,7 +175,6 @@ impl Scheduler {
     }
 
     pub fn update(&mut self, messages: Vec<ToSchedulerMessage>) -> bool {
-        let mut new_tasks: Vec<TaskRef> = Vec::new();
         let mut invoke_scheduling = false;
         for message in messages {
             match message {
@@ -146,7 +186,10 @@ impl Scheduler {
                     let task_id = ti.id;
                     let inputs: Vec<_> = ti.inputs.iter().map(|id| self.tasks.get(id).unwrap().clone()).collect();
                     let task = TaskRef::new(ti, inputs);
-                    new_tasks.push(task.clone());
+                    if task.get().is_ready() {
+                        self.ready_to_assign.push(task.clone());
+                    }
+                    self.new_tasks.push(task.clone());
                     assert!(self.tasks.insert(task_id, task).is_none());
                     invoke_scheduling = true;
                 }
@@ -198,7 +241,7 @@ impl Scheduler {
 mod tests {
     use super::*;
     use tokio::sync::mpsc::unbounded_channel;
-    use crate::scheduler::schedproto::TaskInfo;
+    use crate::scheduler::schedproto::{TaskInfo, WorkerInfo};
 
     /* Graph1
          T1
@@ -224,7 +267,7 @@ mod tests {
         })
     }
 
-    fn submit_graph1(scheduler: &mut Scheduler, mut sender: &mut UnboundedSender<FromSchedulerMessage>) {
+    fn submit_graph1(scheduler: &mut Scheduler) {
        scheduler.update(vec![
            new_task(1, vec![]),
            new_task(2, vec![1]),
@@ -233,14 +276,27 @@ mod tests {
            new_task(5, vec![4]),
            new_task(6, vec![3]),
            new_task(7, vec![6]),
-        ], &mut sender);
+        ]);
+    }
+
+    fn connect_workers(scheduler: &mut Scheduler, count: u32, n_cpus: u32) {
+        for i in 0..count {
+            scheduler.update(vec![
+            ToSchedulerMessage::NewWorker(WorkerInfo {
+                id: 100 + i as WorkerId,
+                n_cpus,
+            })]);
+        }
     }
 
     #[test]
-    fn test_new_tasks() {
+    fn test_b_level() {
         let mut sender = make_sender();
         let mut scheduler = Scheduler::new();
-        submit_graph1(&mut scheduler, &mut sender);
+        submit_graph1(&mut scheduler);
+        assert_eq!(scheduler.ready_to_assign.len(), 1);
+        assert_eq!(scheduler.ready_to_assign[0].get().id, 1);
+        scheduler.schedule(&mut sender);
         assert_eq!(scheduler.get_task(7).get().b_level, 1.0);
         assert_eq!(scheduler.get_task(6).get().b_level, 2.0);
         assert_eq!(scheduler.get_task(5).get().b_level, 1.0);
@@ -249,5 +305,15 @@ mod tests {
         assert_eq!(scheduler.get_task(2).get().b_level, 3.0);
         assert_eq!(scheduler.get_task(1).get().b_level, 4.0);
     }
+
+    #[test]
+    fn test_worker_1_1() {
+        let mut sender = make_sender();
+        let mut scheduler = Scheduler::new();
+        submit_graph1(&mut scheduler);
+        connect_workers(&mut scheduler, 1, 1);
+        scheduler.schedule(&mut sender);
+    }
+
 }
 

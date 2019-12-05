@@ -35,7 +35,7 @@ impl Worker {
     pub fn make_sched_info(&self) -> crate::scheduler::schedproto::WorkerInfo {
         crate::scheduler::schedproto::WorkerInfo {
             id: self.id,
-            ncpus: self.ncpus,
+            n_cpus: self.ncpus,
         }
     }
 

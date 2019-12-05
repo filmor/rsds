@@ -12,8 +12,8 @@ impl WorkerRef {
     pub fn new(wi: WorkerInfo) -> Self {
         Self::wrap(Worker {
             id: wi.id,
-            ncpus: wi.ncpus,
-            free_cpus: wi.ncpus as i32,
+            ncpus: wi.n_cpus,
+            free_cpus: wi.n_cpus as i32,
         })
     }
 }

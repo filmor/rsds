@@ -16,7 +16,8 @@ pub struct Task {
     pub b_level: f32,
     pub unfinished_deps: u32,
     pub assigned_worker: Option<WorkerRef>,
-    pub placement: Vec<WorkerRef>,
+    pub placement: HashSet<WorkerRef>,
+    pub size: f32,
 }
 
 pub type TaskRef = crate::common::WrappedRcRefCell<Task>;
@@ -62,6 +63,7 @@ impl TaskRef {
             state: SchedulerTaskState::Waiting,
             b_level: 0.0,
             unfinished_deps,
+            size: 0.0f32,
             consumers: Default::default(),
             assigned_worker: None,
             placement: Default::default(),

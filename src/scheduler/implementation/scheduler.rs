@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -13,6 +13,7 @@ use std::time::{Instant, Duration};
 use tokio::sync::oneshot;
 use tokio::timer::{delay, Delay};
 use futures::{future};
+use rand::seq::SliceRandom;
 
 
 pub struct Scheduler {
@@ -56,8 +57,6 @@ impl Scheduler {
                 }))
                 .expect("Send failed");
 
-/*            let (wake_send, mut wake_recv) = oneshot::channel::<()>();
-            let mut wake_send = Some(wake_send);*/
             let mut scheduler_delay : Option<Delay> = None;
             let mut need_scheduling = false;
 
@@ -120,6 +119,7 @@ impl Scheduler {
         if self.workers.is_empty() {
             return;
         }
+
         // TODO: Do not sort on every schedule
         //self.ready_to_assign.sort_by(|a, b| a.get().b_level.partial_cmp(&b.get().b_level).unwrap());
 
@@ -133,39 +133,37 @@ impl Scheduler {
         let mut tref = self.get_task(tu.id).clone();
         let mut task = tref.get_mut();
         match tu.state {
+            TaskUpdateType::Finished => {
+                let worker = self.get_worker(tu.worker).clone();
+                assert!(task.is_waiting() && task.is_ready());
+                task.state = SchedulerTaskState::Finished;
+                task.size = tu.size.unwrap();
+                let mut invoke_scheduling = false;
+                for tref in &task.consumers {
+                    let mut t = tref.get_mut();
+                    if t.unfinished_deps <= 1 {
+                        assert!(t.unfinished_deps > 0);
+                        assert!(t.is_waiting());
+                        t.unfinished_deps -= 1;
+                        self.ready_to_assign.push(tref.clone());
+                        invoke_scheduling = true;
+                    } else {
+                        t.unfinished_deps -= 1;
+                    }
+                }
+                return invoke_scheduling;
+                task.placement.insert(worker);
+            },
             TaskUpdateType::Placed => {
                 let worker = self.get_worker(tu.worker).clone();
-                match task.state {
-                    SchedulerTaskState::Waiting if task.is_ready() => {
-                        task.state = SchedulerTaskState::Finished;
-                        let mut invoke_scheduling = false;
-                        for tref in &task.consumers {
-                            let mut t = tref.get_mut();
-                            if t.unfinished_deps <= 1 {
-                                assert!(t.unfinished_deps > 0);
-                                assert!(t.is_waiting());
-                                t.unfinished_deps -= 1;
-                                self.ready_to_assign.push(tref.clone());
-                                invoke_scheduling = true;
-                            } else {
-                                t.unfinished_deps -= 1;
-                            }
-                        }
-                        return invoke_scheduling;
-                    },
-                    SchedulerTaskState::Finished => {
-                        /* do nothing extra */
-                    },
-                    _ => {
-                        panic!("Invalid update");
-                    }
-                };
-                task.placement.push(worker);
+                assert!(task.is_finished());
+                task.placement.insert(worker);
             },
             TaskUpdateType::Removed => {
                 let worker = self.get_worker(tu.worker);
-                let index = task.placement.iter().position(|x| x == worker).unwrap();
-                task.placement.remove(index);
+                assert!(task.placement.remove(worker));
+                /*let index = task.placement.iter().position(|x| x == worker).unwrap();
+                task.placement.remove(index);*/
             },
             TaskUpdateType::Discard => {
                 task.placement.clear();
@@ -234,6 +232,30 @@ impl Scheduler {
                 .unwrap();
         }*/
     }
+
+    fn choose_worker_for_task(&self, task: &Task) -> WorkerRef {
+        let mut costs = f32::max_value();
+        let mut workers = Vec::new();
+        for wr in self.workers.values() {
+            let c = task_transfer_cost(task, wr);
+            if c < costs {
+                costs = c;
+                workers.clear();
+                workers.push(wr.clone());
+            } else if c == costs {
+                workers.push(wr.clone());
+            }
+        }
+        unimplemented!()
+    }
+}
+
+fn task_transfer_cost(task: &Task, worker_ref: &WorkerRef) -> f32 {
+    // TODO: For large number of inputs, only sample inputs
+    task.inputs.iter().take(512).map(|tr| {
+        let t = tr.get();
+        if t.placement.contains(worker_ref) { 0f32 } else { t.size }
+    }).sum()
 }
 
 

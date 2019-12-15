@@ -11,6 +11,8 @@ pub struct WorkerInfo {
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize)]
 pub enum TaskUpdateType {
+    Finished,
+    // Task was computed on a worker
     Placed,
     // Task data are available on worker
     Removed,
@@ -30,6 +32,7 @@ pub struct TaskUpdate {
     pub id: TaskId,
     pub state: TaskUpdateType,
     pub worker: WorkerId,
+    pub size: Option<f32>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

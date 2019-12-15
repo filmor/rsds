@@ -1,9 +1,11 @@
-use crate::scheduler::schedproto::{WorkerId, WorkerInfo};
+use crate::scheduler::schedproto::{WorkerId, WorkerInfo, TaskId};
+use std::collections::HashSet;
 
 pub struct Worker {
     pub id: WorkerId,
     pub ncpus: u32,
-    pub free_cpus: i32,
+    pub load_ncpus: u32,
+    pub tasks: HashSet<TaskId>,
 }
 
 pub type WorkerRef = crate::common::WrappedRcRefCell<Worker>;
@@ -13,7 +15,8 @@ impl WorkerRef {
         Self::wrap(Worker {
             id: wi.id,
             ncpus: wi.n_cpus,
-            free_cpus: wi.n_cpus as i32,
+            load_ncpus: 0,
+            tasks: Default::default(),
         })
     }
 }

@@ -5,15 +5,17 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::scheduler::{ToSchedulerMessage, FromSchedulerMessage};
 use crate::scheduler::schedproto::{WorkerId, TaskAssignment, SchedulerRegistration, TaskId, TaskUpdateType, TaskUpdate};
 use crate::scheduler::interface::SchedulerComm;
-use futures::StreamExt;
+use futures::{StreamExt, SinkExt};
 use crate::scheduler::implementation::task::{TaskRef, Task, SchedulerTaskState};
-use crate::scheduler::implementation::worker::WorkerRef;
+use crate::scheduler::implementation::worker::{WorkerRef, Worker};
 use crate::scheduler::implementation::utils::compute_b_level;
 use std::time::{Instant, Duration};
 use tokio::sync::oneshot;
 use tokio::timer::{delay, Delay};
 use futures::{future};
 use rand::seq::SliceRandom;
+use rand::rngs::ThreadRng;
+use rand::thread_rng;
 
 
 pub struct Scheduler {
@@ -22,6 +24,8 @@ pub struct Scheduler {
     tasks: HashMap<TaskId, TaskRef>,
     ready_to_assign: Vec<TaskRef>,
     new_tasks: Vec<TaskRef>,
+    notifications: HashSet<TaskRef>,
+    rng: ThreadRng,
 }
 
 const MIN_SCHEDULING_DELAY : Duration = Duration::from_millis(15);
@@ -34,6 +38,8 @@ impl Scheduler {
             ready_to_assign: Default::default(),
             new_tasks: Default::default(),
             network_bandwidth: 100.0, // Guess better default
+            notifications: Default::default(),
+            rng: thread_rng()
         }
     }
 
@@ -110,23 +116,42 @@ impl Scheduler {
             Ok(())
     }
 
+    pub fn assign_task_to_worker(&mut self, task: &mut Task, task_ref: TaskRef, worker: &mut Worker, worker_ref: WorkerRef) {
+        self.notifications.insert(task_ref.clone());
+        task.assigned_worker = Some(worker_ref);
+        assert!(worker.tasks.insert(task_ref));
+    }
+
     pub fn schedule(&mut self, sender: &mut UnboundedSender<FromSchedulerMessage>) {
+        if self.workers.is_empty() {
+            return;
+        }
         if !self.new_tasks.is_empty() {
             // TODO: utilize information and do not recompute all b-levels
             compute_b_level(&self.tasks);
             self.new_tasks = Vec::new()
         }
-        if self.workers.is_empty() {
-            return;
+
+        for tr in std::mem::replace(&mut self.ready_to_assign, Default::default()).into_iter() {
+            let mut task = tr.get_mut();
+            let worker = self.choose_worker_for_task(&mut task);
+            log::debug!("Task {} assigned to {}", task.id, worker.get().id);
+            assert!(task.assigned_worker.is_none());
         }
 
-        // TODO: Do not sort on every schedule
-        //self.ready_to_assign.sort_by(|a, b| a.get().b_level.partial_cmp(&b.get().b_level).unwrap());
-
-    }
-
-    pub fn process_new_tasks(&self, new_tasks: Vec<TaskRef>) {
-
+        let assignments : Vec<_> = self.notifications.iter().map(|tr| {
+            let task = tr.get();
+            let worker_ref = task.assigned_worker.clone().unwrap();
+            let worker = worker_ref.get();
+            TaskAssignment {
+                task: task.id,
+                worker: worker.id,
+                priority: 0,
+                // TODO derive priority from b-level
+            }
+        }).collect();
+        self.notifications.clear();
+        sender.send(FromSchedulerMessage::TaskAssignments(assignments));
     }
 
     fn task_update(&mut self, tu: TaskUpdate) -> bool {
@@ -206,9 +231,6 @@ impl Scheduler {
             }
         }
 
-        /*if !new_tasks.is_empty() {
-            self.process_new_tasks(new_tasks)
-        }*/
         return invoke_scheduling;
 
         // HACK, random scheduler
@@ -233,8 +255,8 @@ impl Scheduler {
         }*/
     }
 
-    fn choose_worker_for_task(&self, task: &Task) -> WorkerRef {
-        let mut costs = f32::max_value();
+    fn choose_worker_for_task(&mut self, task: &Task) -> WorkerRef {
+        let mut costs = std::f32::MAX;
         let mut workers = Vec::new();
         for wr in self.workers.values() {
             let c = task_transfer_cost(task, wr);
@@ -246,7 +268,11 @@ impl Scheduler {
                 workers.push(wr.clone());
             }
         }
-        unimplemented!()
+        if workers.len() == 1 {
+            workers.pop().unwrap()
+        } else {
+            workers.choose(&mut self.rng).unwrap().clone()
+        }
     }
 }
 
@@ -335,6 +361,7 @@ mod tests {
         submit_graph1(&mut scheduler);
         connect_workers(&mut scheduler, 1, 1);
         scheduler.schedule(&mut sender);
+        sender.
     }
 
 }

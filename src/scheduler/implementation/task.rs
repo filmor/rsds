@@ -44,6 +44,32 @@ impl Task {
     pub fn is_ready(&self) -> bool {
         self.unfinished_deps == 0
     }
+
+    pub fn sanity_check(&self, task_ref: &TaskRef) {
+        let mut unfinished = 0;
+        for inp in &self.inputs {
+            let ti = inp.get();
+            if let SchedulerTaskState::Waiting = ti.state {
+                unfinished += 1;
+            }
+            assert!(ti.consumers.contains(task_ref));
+
+        }
+        assert_eq!(unfinished, self.unfinished_deps);
+
+        match self.state {
+            SchedulerTaskState::Waiting => {
+                for c in &self.consumers {
+                    assert!(c.get().is_waiting());
+                }
+            },
+            SchedulerTaskState::Finished => {
+                for inp in &self.inputs {
+                    assert!(inp.get().is_finished());
+                }
+            },
+        };
+    }
 }
 
 impl TaskRef {

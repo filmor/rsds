@@ -8,6 +8,17 @@ pub struct Worker {
     pub tasks: HashSet<TaskRef>,
 }
 
+impl Worker {
+    pub fn sanity_check(&self, worker_ref: &WorkerRef) {
+        for tr in &self.tasks {
+            let task = tr.get();
+            assert!(task.is_waiting());
+            let wr = task.assigned_worker.as_ref().unwrap();
+            assert!(wr.eq(worker_ref));
+        }
+    }
+}
+
 pub type WorkerRef = crate::common::WrappedRcRefCell<Worker>;
 
 impl WorkerRef {

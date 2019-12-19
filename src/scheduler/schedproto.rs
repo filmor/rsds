@@ -32,7 +32,7 @@ pub struct TaskUpdate {
     pub id: TaskId,
     pub state: TaskUpdateType,
     pub worker: WorkerId,
-    pub size: Option<f32>,
+    pub size: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

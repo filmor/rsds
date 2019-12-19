@@ -16,6 +16,7 @@ use futures::{future};
 use rand::seq::SliceRandom;
 use rand::rngs::ThreadRng;
 use rand::thread_rng;
+use smallvec::SmallVec;
 
 
 pub struct Scheduler {
@@ -137,6 +138,11 @@ impl Scheduler {
 
     fn assign_task_to_worker(&mut self, task: &mut Task, task_ref: TaskRef, worker: &mut Worker, worker_ref: WorkerRef, notifications: &mut Notifications) {
         notifications.insert(task_ref.clone());
+        if let Some(wr) = &task.assigned_worker {
+            assert!(!wr.eq(&worker_ref));
+            let mut worker = wr.get_mut();
+            assert!(worker.tasks.remove(&task_ref));
+        }
         task.assigned_worker = Some(worker_ref);
         assert!(worker.tasks.insert(task_ref));
     }
@@ -155,34 +161,86 @@ impl Scheduler {
             let mut task = tr.get_mut();
             let worker_ref = self.choose_worker_for_task(&mut task);
             let mut worker = worker_ref.get_mut();
-            log::debug!("Task {} assigned to {}", task.id, worker.id);
+            log::debug!("Task {} intially assigned to {}", task.id, worker.id);
             assert!(task.assigned_worker.is_none());
             self.assign_task_to_worker(&mut task, tr.clone(), &mut worker, worker_ref.clone(), &mut notifications);
         }
 
         let mut balanced_tasks = Vec::new();
-        let mut underload_workers = Vec::new();
+        let has_underload_workers = self.workers.values().filter(|wr| {
+            let worker = wr.get();
+            let len = worker.tasks.len() as u32;
+            len < worker.ncpus
+        }).next().is_some();
+
+        if !has_underload_workers {
+            return; // Terminate as soon possible when there is nothing to balance
+        }
+
+        log::debug!("Balancing started");
+
         for wr in self.workers.values() {
             let worker = wr.get();
             let len = worker.tasks.len() as u32;
             if len > worker.ncpus {
+                log::debug!("Worker {} offers {} tasks", worker.id, len);
+                for tr in &worker.tasks {
+                    tr.get_mut().take_flag = false;
+                }
                 balanced_tasks.extend(worker.tasks.iter().cloned());
             }
         }
+
+        let mut underload_workers = Vec::new();
         for wr in self.workers.values() {
             let worker = wr.get();
             let len = worker.tasks.len() as u32;
             if len < worker.ncpus {
+                log::debug!("Worker {} is underloaded ({} tasks)", worker.id, len);
                 let mut ts = balanced_tasks.clone();
-                ts.sort_by_cached_key(|tr| task_transfer_cost(&tr.get(), &wr));
+                ts.sort_by_cached_key(|tr| std::u64::MAX - task_transfer_cost(&tr.get(), &wr));
                 underload_workers.push((wr.clone(), ts));
             }
         }
         underload_workers.sort_by_key(|x| x.0.get().tasks.len());
-        /*for (w, mut ts) in &underload_workers {
-            ts = balanced_tasks.clone();
-        }*/
 
+        let mut n_tasks = underload_workers[0].0.get().tasks.len();
+        loop {
+            let mut change = false;
+            for (wr, ts) in underload_workers.iter_mut() {
+                let mut worker = wr.get_mut();
+                if worker.tasks.len() > n_tasks {
+                    break;
+                }
+                if ts.is_empty() {
+                    continue;
+                }
+                while let Some(tr) = ts.pop() {
+                    let mut task = tr.get_mut();
+                    if task.take_flag {
+                        continue;
+                    }
+                    task.take_flag = true;
+                    let wid = {
+                        let wr2 = task.assigned_worker.clone().unwrap();
+                        let worker2 = wr2.get();
+                        if worker2.tasks.len() <= n_tasks {
+                            continue;
+                        }
+                        worker2.id
+                    };
+                    log::debug!("Changing assignment of task={} from worker={} to worker={}", task.id, wid, worker.id);
+                    self.assign_task_to_worker(&mut task, tr.clone(), &mut worker, wr.clone(), &mut notifications);
+                    break;
+                }
+                change = true;
+            }
+            if !change {
+                break
+            }
+            n_tasks += 1;
+        }
+        log::debug!("Balancing finished");
     }
 
     fn task_update(&mut self, tu: TaskUpdate) -> bool {
@@ -194,6 +252,8 @@ impl Scheduler {
                 assert!(task.is_waiting() && task.is_ready());
                 task.state = SchedulerTaskState::Finished;
                 task.size = tu.size.unwrap();
+                let wr = task.assigned_worker.take().unwrap();
+                assert!(wr.get_mut().tasks.remove(&tref));
                 let mut invoke_scheduling = false;
                 for tref in &task.consumers {
                     let mut t = tref.get_mut();
@@ -287,7 +347,7 @@ impl Scheduler {
     }
 
     fn choose_worker_for_task(&mut self, task: &Task) -> WorkerRef {
-        let mut costs = std::f32::MAX;
+        let mut costs = std::u64::MAX;
         let mut workers = Vec::new();
         for wr in self.workers.values() {
             let c = task_transfer_cost(task, wr);
@@ -315,14 +375,19 @@ impl Scheduler {
                 assert!(self.workers.contains_key(&w.get().id));
             }
         }
+
+        for wr in self.workers.values() {
+            let worker = wr.get();
+            worker.sanity_check(&wr);
+        }
     }
 }
 
-fn task_transfer_cost(task: &Task, worker_ref: &WorkerRef) -> f32 {
+fn task_transfer_cost(task: &Task, worker_ref: &WorkerRef) -> u64 {
     // TODO: For large number of inputs, only sample inputs
     task.inputs.iter().take(512).map(|tr| {
         let t = tr.get();
-        if t.placement.contains(worker_ref) { 0f32 } else { t.size }
+        if t.placement.contains(worker_ref) { 0u64 } else { t.size }
     }).sum()
 }
 
@@ -332,6 +397,11 @@ mod tests {
     use super::*;
     use tokio::sync::mpsc::unbounded_channel;
     use crate::scheduler::schedproto::{TaskInfo, WorkerInfo};
+
+    fn init() {
+        std::env::set_var("RUST_LOG", "debug");
+        pretty_env_logger::init();
+    }
 
     /* Graph1
          T1
@@ -374,7 +444,7 @@ mod tests {
         }
     }
 
-    fn finish_task(scheduler: &mut Scheduler, task_id: TaskId, worker_id: WorkerId, size: f32) {
+    fn finish_task(scheduler: &mut Scheduler, task_id: TaskId, worker_id: WorkerId, size: u64) {
         scheduler.update(vec![
             ToSchedulerMessage::TaskUpdate(TaskUpdate {
                 state: TaskUpdateType::Finished,
@@ -425,7 +495,7 @@ mod tests {
         scheduler.sanity_check();
 
         let w = assigned_worker(&mut scheduler, 1);
-        finish_task(&mut scheduler, 1, w, 1.0);
+        finish_task(&mut scheduler, 1, w, 1);
         let n = run_schedule(&mut scheduler);
         assert_eq!(n.len(), 2);
         assert!(n.contains(&2));
@@ -439,6 +509,7 @@ mod tests {
 
     #[test]
     fn test_worker_2_1() {
+        init();
         let mut scheduler = Scheduler::new();
         submit_graph1(&mut scheduler);
         connect_workers(&mut scheduler, 2, 1);
@@ -450,7 +521,7 @@ mod tests {
         scheduler.sanity_check();
 
         let w = assigned_worker(&mut scheduler, 1);
-        finish_task(&mut scheduler, 1, w, 1.0);
+        finish_task(&mut scheduler, 1, w, 1);
         let n = run_schedule(&mut scheduler);
         assert_eq!(n.len(), 2);
         assert!(n.contains(&2));

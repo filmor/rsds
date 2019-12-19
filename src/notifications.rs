@@ -75,7 +75,7 @@ impl Notifications {
             state: TaskUpdateType::Finished,
             id: task.id,
             worker: worker.id,
-            size: Some((task.data_info().unwrap().size as f32) / (1024f32 * 1024f32)),
+            size: Some(task.data_info().unwrap().size),
         }));
     }
 

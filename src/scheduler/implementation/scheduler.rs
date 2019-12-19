@@ -63,7 +63,7 @@ impl Scheduler {
                 // TODO derive priority from b-level
             }
         }).collect();
-        sender.send(FromSchedulerMessage::TaskAssignments(assignments));
+        sender.try_send(FromSchedulerMessage::TaskAssignments(assignments)).expect("Send failed");
     }
 
     pub async fn start(mut self, mut comm: SchedulerComm) -> crate::Result<()> {
@@ -165,13 +165,24 @@ impl Scheduler {
         for wr in self.workers.values() {
             let worker = wr.get();
             let len = worker.tasks.len() as u32;
-            if len < worker.ncpus {
-                underload_workers.push(wr.clone());
-            } else if len > worker.ncpus {
+            if len > worker.ncpus {
                 balanced_tasks.extend(worker.tasks.iter().cloned());
             }
         }
-        underload_workers.sort_by_key(|w| w.get().tasks.len());
+        for wr in self.workers.values() {
+            let worker = wr.get();
+            let len = worker.tasks.len() as u32;
+            if len < worker.ncpus {
+                let mut ts = balanced_tasks.clone();
+                ts.sort_by_cached_key(|tr| task_transfer_cost(&tr.get(), &wr));
+                underload_workers.push((wr.clone(), ts));
+            }
+        }
+        underload_workers.sort_by_key(|x| x.0.get().tasks.len());
+        /*for (w, mut ts) in &underload_workers {
+            ts = balanced_tasks.clone();
+        }*/
+
     }
 
     fn task_update(&mut self, tu: TaskUpdate) -> bool {

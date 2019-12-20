@@ -161,7 +161,7 @@ impl Scheduler {
             let mut task = tr.get_mut();
             let worker_ref = self.choose_worker_for_task(&mut task);
             let mut worker = worker_ref.get_mut();
-            log::debug!("Task {} intially assigned to {}", task.id, worker.id);
+            log::debug!("Task {} initially assigned to {}", task.id, worker.id);
             assert!(task.assigned_worker.is_none());
             self.assign_task_to_worker(&mut task, tr.clone(), &mut worker, worker_ref.clone(), &mut notifications);
         }
@@ -267,8 +267,8 @@ impl Scheduler {
                         t.unfinished_deps -= 1;
                     }
                 }
-                return invoke_scheduling;
                 task.placement.insert(worker);
+                return invoke_scheduling;
             },
             TaskUpdateType::Placed => {
                 let worker = self.get_worker(tu.worker).clone();
@@ -399,11 +399,21 @@ mod tests {
     use crate::scheduler::schedproto::{TaskInfo, WorkerInfo};
 
     fn init() {
-        std::env::set_var("RUST_LOG", "debug");
-        pretty_env_logger::init();
+        //std::env::set_var("RUST_LOG", "debug");
+        //pretty_env_logger::init();
+        let _ = pretty_env_logger::try_init().map_err(|_| {
+            println!("Logging initialized failed");
+        });
     }
 
-    /* Graph1
+    fn new_task(id: TaskId, inputs: Vec<TaskId>) -> ToSchedulerMessage {
+        ToSchedulerMessage::NewTask(TaskInfo {
+                id: id,
+                inputs: inputs
+        })
+    }
+
+    /* Graph simple
          T1
         /  \
        T2   T3
@@ -414,15 +424,7 @@ mod tests {
           T5
 
     */
-
-    fn new_task(id: TaskId, inputs: Vec<TaskId>) -> ToSchedulerMessage {
-        ToSchedulerMessage::NewTask(TaskInfo {
-                id: id,
-                inputs: inputs
-        })
-    }
-
-    fn submit_graph1(scheduler: &mut Scheduler) {
+    fn submit_graph_simple(scheduler: &mut Scheduler) {
        scheduler.update(vec![
            new_task(1, vec![]),
            new_task(2, vec![1]),
@@ -432,6 +434,34 @@ mod tests {
            new_task(6, vec![3]),
            new_task(7, vec![6]),
         ]);
+    }
+
+
+    /* Graph reduce
+
+        0   1   2   3   4 .. n-1
+         \  \   |   /  /    /
+          \--\--|--/--/----/
+                |
+                n
+    */
+    fn submit_graph_reduce(scheduler: &mut Scheduler, size: usize) {
+       let mut tasks : Vec<_> = (0..size).map(|t| new_task(t as TaskId, Vec::new())).collect();
+       tasks.push(new_task(size as TaskId, (0..size as TaskId).collect()));
+       scheduler.update(tasks);
+    }
+
+    /* Graph split
+
+        0
+        |\---\---\------\
+        | \   \   \     \
+        1  2   3   4  .. n-1
+    */
+    fn submit_graph_split(scheduler: &mut Scheduler, size: usize) {
+       let mut tasks = vec![new_task(0, Vec::new())];
+       tasks.extend((1..=size).map(|t| new_task(t as TaskId, vec![0])));
+       scheduler.update(tasks);
     }
 
     fn connect_workers(scheduler: &mut Scheduler, count: u32, n_cpus: u32) {
@@ -462,13 +492,13 @@ mod tests {
     }
 
     fn assigned_worker(scheduler: &mut Scheduler, task_id: TaskId) -> WorkerId {
-        scheduler.tasks.get(&task_id).unwrap().get().assigned_worker.as_ref().unwrap().get().id
+        scheduler.tasks.get(&task_id).expect("Unknown task").get().assigned_worker.as_ref().expect("Worker not assigned").get().id
     }
 
     #[test]
     fn test_b_level() {
         let mut scheduler = Scheduler::new();
-        submit_graph1(&mut scheduler);
+        submit_graph_simple(&mut scheduler);
         assert_eq!(scheduler.ready_to_assign.len(), 1);
         assert_eq!(scheduler.ready_to_assign[0].get().id, 1);
         connect_workers(&mut scheduler, 1, 1);
@@ -483,9 +513,9 @@ mod tests {
     }
 
     #[test]
-    fn test_worker_1_1() {
+    fn test_simple_w1_1() {
         let mut scheduler = Scheduler::new();
-        submit_graph1(&mut scheduler);
+        submit_graph_simple(&mut scheduler);
         connect_workers(&mut scheduler, 1, 1);
         scheduler.sanity_check();
 
@@ -508,10 +538,10 @@ mod tests {
     }
 
     #[test]
-    fn test_worker_2_1() {
+    fn test_simple_w2_1() {
         init();
         let mut scheduler = Scheduler::new();
-        submit_graph1(&mut scheduler);
+        submit_graph_simple(&mut scheduler);
         connect_workers(&mut scheduler, 2, 1);
         scheduler.sanity_check();
 
@@ -530,6 +560,65 @@ mod tests {
         let t3 = scheduler.tasks.get(&3).unwrap();
         assert_ne!(assigned_worker(&mut scheduler, 2), assigned_worker(&mut scheduler, 3));
         scheduler.sanity_check();
+    }
+
+    #[test]
+    fn test_reduce_w5_1() {
+        init();
+        let mut scheduler = Scheduler::new();
+        submit_graph_reduce(&mut scheduler, 5000);
+        connect_workers(&mut scheduler, 5, 1);
+        scheduler.sanity_check();
+
+        let n = run_schedule(&mut scheduler);
+        assert_eq!(n.len(), 5000);
+        scheduler.sanity_check();
+
+        let mut wcount = HashMap::new();
+        for t in 0..5000 {
+            assert!(n.contains(&t));
+            let wid = assigned_worker(&mut scheduler, t);
+            let c = wcount.entry(wid).or_insert(0);
+            *c += 1;
+        }
+
+        dbg!(&wcount);
+        assert_eq!(wcount.len(), 5);
+        for v in wcount.values() {
+            assert!(*v > 400);
+        }
+    }
+
+    #[test]
+    fn test_split_w5_1() {
+        init();
+        let mut scheduler = Scheduler::new();
+        submit_graph_split(&mut scheduler, 5000);
+        connect_workers(&mut scheduler, 5, 1);
+        scheduler.sanity_check();
+
+        let n = run_schedule(&mut scheduler);
+        let w = assigned_worker(&mut scheduler, 0);
+        finish_task(&mut scheduler, 0, w, 100_000_000);
+        scheduler.sanity_check();
+
+        let n = run_schedule(&mut scheduler);
+        assert_eq!(n.len(), 5000);
+        scheduler.sanity_check();
+
+        let mut wcount = HashMap::new();
+        for t in 1..=5000 {
+            assert!(n.contains(&t));
+            let wid = assigned_worker(&mut scheduler, t);
+            let c = wcount.entry(wid).or_insert(0);
+            *c += 1;
+        }
+
+        dbg!(&wcount);
+        assert_eq!(wcount.len(), 5);
+        for v in wcount.values() {
+            assert!(*v > 400);
+        }
     }
 }
 

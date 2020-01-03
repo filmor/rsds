@@ -3,22 +3,19 @@ use std::thread;
 
 use structopt::StructOpt;
 use tokio::net::TcpListener;
-use tokio::runtime::current_thread;
+use tokio::runtime::Runtime;
 
 use rsds::prelude::*;
 use rsds::scheduler::interface::prepare_scheduler_comm;
-
-#[global_allocator]
-static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "rsds", about = "Rust Dask Scheduler")]
 struct Opt {
     #[structopt(long, default_value = "7070")]
-    port: u16
+    port: u16,
 }
 
-#[tokio::main(single_thread)]
+#[tokio::main(basic_scheduler)]
 async fn main() -> rsds::Result<()> {
     if std::env::var("RUST_LOG").is_err() {
         std::env::set_var("RUST_LOG", "info");
@@ -37,23 +34,21 @@ async fn main() -> rsds::Result<()> {
 
     thread::spawn(move || {
         let scheduler = rsds::scheduler::implementation::Scheduler::new();
-        let mut runtime = current_thread::Runtime::new().expect("Runtime creation failed");
+        let mut runtime = Runtime::new().expect("Runtime creation failed");
         runtime
             .block_on(scheduler.start(comm))
             .expect("Scheduler failed");
     });
 
-
     let core_ref = CoreRef::new(sender);
     let core_ref2 = core_ref.clone();
-    current_thread::spawn(async move {
-        core_ref2
-            .observe_scheduler(receiver)
-            .await
-    });
+    core_ref2.observe_scheduler(receiver).await;
 
-    rsds::connection::connection_initiator(listener, core_ref)
-        .await
-        .expect("Connection initiator failed");
+    // tokio::spawn(async move {
+        rsds::connection::connection_initiator(listener, core_ref)
+            .await
+            .expect("Connection initiator failed");
+    // });
+
     Ok(())
 }

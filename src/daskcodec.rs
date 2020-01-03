@@ -1,7 +1,8 @@
 use std::io::Cursor;
 
 use byteorder::{LittleEndian, ReadBytesExt};
-use tokio::codec::{Decoder, Encoder};
+use tokio_util::codec::{Decoder, Encoder};
+use bytes::{Buf, Bytes, BytesMut};
 
 use crate::prelude::*;
 
@@ -84,7 +85,7 @@ impl Decoder for DaskCodec {
             if *main_size > size {
                 return Ok(None);
             }
-            self.main_message = Some(src.split_to(*main_size as usize).into());
+            self.main_message = Some(src.split_to(*main_size as usize).freeze());
         }
 
         for i in self.other_messages.len()..sizes.len() {
@@ -94,7 +95,7 @@ impl Decoder for DaskCodec {
                 return Ok(None);
             }
             self.other_messages
-                .push(src.split_to(frame_size as usize).into());
+                .push(src.split_to(frame_size as usize).freeze());
         }
         self.sizes = None;
         Ok(Some(DaskMessage {

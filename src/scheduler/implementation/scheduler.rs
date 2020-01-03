@@ -35,7 +35,7 @@ impl Scheduler {
             log::debug!("Scheduler initialized");
 
             comm.send
-                .try_send(FromSchedulerMessage::Register(SchedulerRegistration {
+                .send(FromSchedulerMessage::Register(SchedulerRegistration {
                     protocol_version: 0,
                     scheduler_name: "test_scheduler".into(),
                     scheduler_version: "0.0".into(),
@@ -93,7 +93,7 @@ impl Scheduler {
             self._tmp_hack.clear();
 
             sender
-                .try_send(FromSchedulerMessage::TaskAssignments(result))
+                .send(FromSchedulerMessage::TaskAssignments(result))
                 .unwrap();
         }
     }

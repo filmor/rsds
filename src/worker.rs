@@ -6,7 +6,7 @@ use futures::sink::SinkExt;
 use futures::stream::StreamExt;
 use futures::stream::TryStreamExt;
 use rmp_serde as rmps;
-use tokio::codec::Framed;
+use tokio_util::codec::Framed;
 use tokio::net::TcpStream;
 
 use crate::common::WrappedRcRefCell;
@@ -41,12 +41,12 @@ impl Worker {
 
     pub fn send_message(&mut self, message: Vec<ToWorkerMessage>) -> crate::Result<()> {
         let data = rmp_serde::encode::to_vec_named(&message).unwrap();
-        self.sender.try_send(data.into()).unwrap(); // TODO: bail!("Send of worker XYZ failed")
+        self.sender.send(data.into()).unwrap(); // TODO: bail!("Send of worker XYZ failed")
         Ok(())
     }
 
     pub fn send_dask_message(&mut self, message: DaskMessage) -> crate::Result<()> {
-        self.sender.try_send(message).unwrap(); // TODO: bail!("Send of worker XYZ failed")
+        self.sender.send(message).unwrap(); // TODO: bail!("Send of worker XYZ failed")
         Ok(())
     }
 }
@@ -71,7 +71,7 @@ pub async fn start_worker(
         worker_plugins: Vec::new(),
     };
     let data = rmp_serde::encode::to_vec_named(&hb)?;
-    snd_sender.try_send(data.into()).unwrap();
+    snd_sender.send(data.into()).unwrap();
 
     let (worker_id, worker_ref) = {
         let mut core = core_ref.get_mut();

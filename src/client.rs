@@ -6,7 +6,7 @@ use futures::sink::SinkExt;
 use futures::stream::StreamExt;
 use futures::stream::TryStreamExt;
 use rmp_serde as rmps;
-use tokio::codec::Framed;
+use tokio_util::codec::Framed;
 use tokio::net::TcpStream;
 
 use crate::daskcodec::{DaskCodec, DaskMessage};
@@ -31,7 +31,7 @@ impl Client {
     }
 
     pub fn send_dask_message(&mut self, dask_message: DaskMessage) -> crate::Result<()> {
-        self.sender.try_send(dask_message).unwrap(); // TODO: bail!("Send to client XXX failed")
+        self.sender.send(dask_message).unwrap(); // TODO: bail!("Send to client XXX failed")
         Ok(())
     }
 

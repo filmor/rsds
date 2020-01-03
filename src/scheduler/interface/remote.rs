@@ -1,5 +1,5 @@
 use futures::{FutureExt, SinkExt, StreamExt};
-use tokio::codec::{Framed, LengthDelimitedCodec};
+use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tokio::net::TcpStream;
 
 use crate::scheduler::{FromSchedulerMessage};
@@ -29,7 +29,7 @@ impl RemoteScheduler {
                 let msg = msg?;
                 let data: FromSchedulerMessage = serde_json::from_slice(&msg)?;
                 log::debug!("Received scheduler command: {:?}", data);
-                send.try_send(data).expect("Send failed");
+                send.send(data).expect("Send failed");
             }
             Ok(())
         }

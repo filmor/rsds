@@ -46,6 +46,8 @@ impl<T> WrappedRcRefCell<T> {
     } */
 }
 
+unsafe impl<T> Send for WrappedRcRefCell<T> {}
+
 impl<T> Clone for WrappedRcRefCell<T> {
     fn clone(&self) -> Self {
         WrappedRcRefCell {

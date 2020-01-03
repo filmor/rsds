@@ -115,7 +115,7 @@ impl Core {
         log::debug!("Sending update to scheduler");
         let update = std::mem::replace(&mut self.update, Default::default());
         let msg = ToSchedulerMessage::Update(update);
-        self.scheduler_sender.try_send(msg).unwrap();
+        self.scheduler_sender.send(msg).unwrap();
     }
 
     pub fn send_scheduler_update(&mut self, aggregate: bool) {
@@ -139,7 +139,7 @@ impl Core {
     }*/
 
     pub fn send_scheduler_messages(&mut self, messages: Vec<ToSchedulerMessage>) {
-        self.scheduler_sender.try_send(messages).unwrap();
+        self.scheduler_sender.send(messages).unwrap();
     }
 
     pub fn new_self_ref(&self) -> CoreRef {

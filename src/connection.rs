@@ -1,10 +1,10 @@
 use std::error::Error;
 
 use rmp_serde as rmps;
-use tokio::codec::Framed;
+use tokio_util::codec::Framed;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::prelude::*;
-use tokio::runtime::current_thread;
+use tokio::stream::StreamExt;
+use futures::sink::SinkExt;
 
 use crate::client::{gather, start_client};
 use crate::daskcodec::DaskCodec;
@@ -16,9 +16,7 @@ pub async fn connection_initiator(mut listener: TcpListener, core_ref: CoreRef) 
     loop {
         let (socket, address) = listener.accept().await?;
         let core_ref = core_ref.clone();
-        current_thread::spawn(async move {
-            handle_connection(core_ref, socket, address).await.expect("Connection failed");
-        });
+        handle_connection(core_ref, socket, address).await.expect("Connection failed");
     }
 }
 
